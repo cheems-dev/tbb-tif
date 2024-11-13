@@ -6,66 +6,86 @@ g++ -o cholesky_tbb cholesky_tbb.cpp -ltbb -std=c++11
 #include <iostream>
 #include <vector>
 #include <cmath>
-#include <tbb/parallel_for.h>
+#include <tbb/parallel_pipeline.h>
+#include <tbb/flow_control.h>
 
-bool choleskyDecomposition(std::vector<std::vector<double>> &matrix, int n)
+struct MatrixData {
+    std::vector<std::vector<double>>& matrix;
+    int n;
+};
+
+bool choleskyDecompositionPipeline(MatrixData& data)
 {
-  for (int i = 0; i < n; ++i)
-  {
-    double sum = matrix[i][i];
-
-    for (int k = 0; k < i; ++k)
+    for (int i = 0; i < data.n; ++i)
     {
-      sum -= matrix[i][k] * matrix[i][k];
+        // Calcula el elemento diagonal
+        double sum = data.matrix[i][i];
+        for (int k = 0; k < i; ++k)
+        {
+            sum -= data.matrix[i][k] * data.matrix[i][k];
+        }
+
+        if (sum <= 0)
+        {
+            std::cerr << "Matrix is not positive definite" << std::endl;
+            return false;
+        }
+
+        data.matrix[i][i] = std::sqrt(sum);
+
+        // Etapa de pipeline para calcular las columnas
+        tbb::parallel_pipeline(
+            /*num_items=*/data.n - i - 1,
+            tbb::make_filter<void, int>(tbb::filter::serial, [&](tbb::flow_control& fc) -> int {
+                static int j = i + 1;
+                if (j >= data.n) {
+                    fc.stop();
+                    return 0;
+                }
+                return j++;
+            }) &
+            tbb::make_filter<int, void>(tbb::filter::parallel, [&](int j) {
+                double sum = data.matrix[j][i];
+                for (int k = 0; k < i; ++k) {
+                    sum -= data.matrix[j][k] * data.matrix[i][k];
+                }
+                data.matrix[j][i] = sum / data.matrix[i][i];
+            })
+        );
     }
-
-    if (sum <= 0)
-    {
-      std::cerr << "Matrix is not positive definite" << std::endl;
-      return false;
-    }
-
-    matrix[i][i] = std::sqrt(sum);
-
-    tbb::parallel_for(i + 1, n, [&](int j)
-                      {
-            double sum = matrix[j][i];
-            for (int k = 0; k < i; ++k) {
-                sum -= matrix[j][k] * matrix[i][k];
-            }
-            matrix[j][i] = sum / matrix[i][i]; });
-  }
-  return true;
+    return true;
 }
 
 int main(int argc, char *argv[])
 {
-  if (argc < 2)
-  {
-    std::cerr << "Usage: " << argv[0] << " <matrix_size>" << std::endl;
-    return 1;
-  }
-
-  int n = std::stoi(argv[1]);
-
-  std::vector<std::vector<double>> matrix(n, std::vector<double>(n, 1.0));
-  for (int i = 0; i < n; ++i)
-    matrix[i][i] += n; // Ensure positive definiteness
-
-  if (!choleskyDecomposition(matrix, n))
-  {
-    return 1;
-  }
-
-  // Output the resulting lower triangular matrix
-  for (int i = 0; i < n; ++i)
-  {
-    for (int j = 0; j <= i; ++j)
+    if (argc < 2)
     {
-      std::cout << matrix[i][j] << " ";
+        std::cerr << "Usage: " << argv[0] << " <matrix_size>" << std::endl;
+        return 1;
     }
-    std::cout << std::endl;
-  }
 
-  return 0;
+    int n = std::stoi(argv[1]);
+
+    std::vector<std::vector<double>> matrix(n, std::vector<double>(n, 1.0));
+    for (int i = 0; i < n; ++i)
+        matrix[i][i] += n; // Asegura que la matriz sea definida positiva
+
+    MatrixData data{matrix, n};
+    if (!choleskyDecompositionPipeline(data))
+    {
+        return 1;
+    }
+
+    // Imprimir la matriz triangular inferior resultante
+    for (int i = 0; i < n; ++i)
+    {
+        for (int j = 0; j <= i; ++j)
+        {
+            std::cout << matrix[i][j] << " ";
+        }
+        std::cout << std::endl;
+    }
+
+    return 0;
 }
+
